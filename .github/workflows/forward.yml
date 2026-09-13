@@ -2,11 +2,11 @@ name: Forward tweets to Telegram
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
-  workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
+    - cron: "*/2 * * * *"    # every 2 minutes  # every 10 minutes
+  workflow_dispatch: {}           # every 2 minutes    # lets you trigger it manually from the Actions tab
 
 permissions:
-  contents: write            # needed so the workflow can commit last_tweet_id.txt
+  contents: write            # needed so the commit last_tweet_id.txt
 
 jobs:
   forward:
