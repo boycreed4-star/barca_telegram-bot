@@ -52,11 +52,40 @@ def save_last_tweet_id(tweet_id):
 
 
 def fetch_latest_tweets(handle):
-    """Fetch the latest tweets from a public profile via X's syndication endpoint."""
-    url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{handle}"
+    """Fetch the latest tweets from a public profile via X's syndication endpoint.
+
+    Retries a couple of times with backoff, and tries an alternate host if the
+    first one is rate-limited -- shared cloud IPs (like GitHub Actions runners)
+    get throttled by X more aggressively than a normal home IP.
+    """
+    import time
+
+    urls = [
+        f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{handle}",
+        f"https://cdn.syndication.twimg.com/srv/timeline-profile/screen-name/{handle}",
+    ]
     params = {"showReplies": "false"}
-    resp = requests.get(url, params=params, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
+
+    resp = None
+    last_error = None
+    for attempt in range(4):
+        url = urls[attempt % len(urls)]
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=20)
+            if resp.status_code == 429:
+                last_error = f"429 from {url}"
+                time.sleep(5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            break
+        except requests.RequestException as e:
+            last_error = str(e)
+            time.sleep(5 * (attempt + 1))
+    else:
+        raise RuntimeError(f"All attempts failed. Last error: {last_error}")
+
+    if resp is None or resp.status_code == 429:
+        raise RuntimeError(f"Still rate-limited after retries. Last error: {last_error}")
 
     match = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
