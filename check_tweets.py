@@ -3,34 +3,34 @@ Forwards new tweets from an X (Twitter) account to a Telegram channel,
 posting just the text + image (no twitter.com/x.com link, so Telegram
 won't generate a link-preview card).
 
-Uses X's public "syndication" endpoint (the same one X uses to render
-embedded tweets on other websites). This is unofficial and undocumented,
-so it can change or break without notice -- if that happens, this is the
-first place to look.
+Uses twikit, authenticated via cookies exported from a real logged-in
+browser session (X retired plain username/password login in 2026).
+
+Requires this environment variable to be set:
+    TELEGRAM_BOT_TOKEN - your Telegram bot's token from BotFather
+
+Also requires a cookies.json file in the same folder (see setup guide).
 """
 
+import asyncio
 import html
-import json
 import os
 import re
 
 import requests
+from twikit import Client
 
 # ---- Configuration -------------------------------------------------------
 
 TWITTER_HANDLE = "BarcaTimes"          # no @
 TELEGRAM_CHANNEL = "@footbal_2325"     # public channel username
 STATE_FILE = "last_tweet_id.txt"
+COOKIES_FILE = "cookies.json"
 MAX_TWEETS_PER_RUN = 5                 # safety cap so a big backlog can't spam the channel
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
-}
+client = Client("en-US")
 
 # ---- State (avoids re-posting the same tweet) -----------------------------
 
@@ -48,83 +48,59 @@ def save_last_tweet_id(tweet_id):
         f.write(str(tweet_id))
 
 
+# ---- Login (uses cookies exported from a real browser session) -----------
+
+
+async def ensure_logged_in():
+    # X retired the old username/password login flow (now requires
+    # JS-obfuscated tokens and supports passkeys, which a plain script
+    # can't drive). Authentication now works only via cookies exported
+    # from a real logged-in browser session -- see cookies.json setup.
+    if not os.path.exists(COOKIES_FILE):
+        raise RuntimeError(
+            f"No {COOKIES_FILE} found. Log into the bot's X account in your "
+            "browser, export its cookies, convert them with convert_cookies.py, "
+            f"and place the result at {COOKIES_FILE} in this folder."
+        )
+
+    client.load_cookies(COOKIES_FILE)
+    try:
+        await client.user_id()  # cheap call to confirm the session is valid
+    except Exception as e:
+        raise RuntimeError(
+            f"{COOKIES_FILE} exists but the session is invalid or expired. "
+            "Log into the account again in your browser and re-export cookies."
+        ) from e
+
+
 # ---- Fetching tweets -------------------------------------------------------
 
 
-def fetch_latest_tweets(handle):
-    """Fetch the latest tweets from a public profile via X's syndication endpoint.
-
-    Retries a couple of times with backoff, and tries an alternate host if the
-    first one is rate-limited -- shared cloud IPs (like GitHub Actions runners)
-    get throttled by X more aggressively than a normal home IP.
-    """
-    import time
-
-    urls = [
-        f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{handle}",
-        f"https://cdn.syndication.twimg.com/srv/timeline-profile/screen-name/{handle}",
-    ]
-    params = {"showReplies": "false"}
-
-    resp = None
-    last_error = None
-    for attempt in range(4):
-        url = urls[attempt % len(urls)]
-        try:
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=20)
-            if resp.status_code == 429:
-                last_error = f"429 from {url}"
-                time.sleep(5 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            break
-        except requests.RequestException as e:
-            last_error = str(e)
-            time.sleep(5 * (attempt + 1))
-    else:
-        raise RuntimeError(f"All attempts failed. Last error: {last_error}")
-
-    if resp is None or resp.status_code == 429:
-        raise RuntimeError(f"Still rate-limited after retries. Last error: {last_error}")
-
-    match = re.search(
-        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-        resp.text,
-        re.DOTALL,
-    )
-    if not match:
-        raise RuntimeError(
-            "Could not find tweet data in the page. X may have changed the "
-            "syndication endpoint's format."
-        )
-
-    data = json.loads(match.group(1))
-    timeline = (
-        data.get("props", {})
-        .get("pageProps", {})
-        .get("timeline", {})
-        .get("entries", [])
-    )
-
-    tweets = []
-    for entry in timeline:
-        tweet = entry.get("content", {}).get("tweet")
-        if tweet:
-            tweets.append(tweet)
-    return tweets
+async def fetch_latest_tweets(handle):
+    user = await client.get_user_by_screen_name(handle)
+    tweets = await client.get_user_tweets(user.id, "Tweets", count=MAX_TWEETS_PER_RUN + 2)
+    return list(tweets)
 
 
 def extract_text_and_image(tweet):
-    text = html.unescape(tweet.get("text") or tweet.get("full_text") or "")
+    text = html.unescape(getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or "")
 
     # Twitter appends a t.co link at the end of the text when there's media
     # attached -- strip it since we're sending the image separately.
     text = re.sub(r"\s*https://t\.co/\w+\s*$", "", text).strip()
 
     image_url = None
-    media_details = tweet.get("mediaDetails") or []
-    if media_details:
-        image_url = media_details[0].get("media_url_https")
+    media_list = getattr(tweet, "media", None) or []
+    if media_list:
+        first = media_list[0]
+        # Different twikit media types expose the URL under slightly
+        # different attribute names -- try the common ones.
+        image_url = (
+            getattr(first, "media_url", None)
+            or getattr(first, "media_url_https", None)
+            or getattr(first, "url", None)
+            or getattr(first, "thumbnail_url", None)
+        )
 
     return text, image_url
 
@@ -154,24 +130,26 @@ def send_to_telegram(text, image_url):
 # ---- Main -------------------------------------------------------------------
 
 
-def main():
+async def main():
+    await ensure_logged_in()
+
     last_id = get_last_tweet_id()
-    tweets = fetch_latest_tweets(TWITTER_HANDLE)
+    tweets = await fetch_latest_tweets(TWITTER_HANDLE)
 
     if not tweets:
         print("No tweets found.")
         return
 
-    tweets.sort(key=lambda t: int(t["id_str"]))
+    tweets.sort(key=lambda t: int(t.id))
 
     if last_id is None:
         # First ever run: don't spam the channel with the whole recent
         # history, just remember the newest tweet and start from there.
-        save_last_tweet_id(tweets[-1]["id_str"])
-        print(f"Initialized. Latest tweet id: {tweets[-1]['id_str']}. No messages sent.")
+        save_last_tweet_id(tweets[-1].id)
+        print(f"Initialized. Latest tweet id: {tweets[-1].id}. No messages sent.")
         return
 
-    new_tweets = [t for t in tweets if int(t["id_str"]) > int(last_id)]
+    new_tweets = [t for t in tweets if int(t.id) > int(last_id)]
     new_tweets = new_tweets[-MAX_TWEETS_PER_RUN:]
 
     if not new_tweets:
@@ -181,9 +159,9 @@ def main():
     for tweet in new_tweets:
         text, image_url = extract_text_and_image(tweet)
         send_to_telegram(text, image_url)
-        save_last_tweet_id(tweet["id_str"])
-        print(f"Posted tweet {tweet['id_str']}")
+        save_last_tweet_id(tweet.id)
+        print(f"Posted tweet {tweet.id}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
