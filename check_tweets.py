@@ -3,13 +3,20 @@ Forwards new tweets from an X (Twitter) account to a Telegram channel,
 posting just the text + image (no twitter.com/x.com link, so Telegram
 won't generate a link-preview card).
 
-Uses twikit, authenticated via cookies exported from a real logged-in
-browser session (X retired plain username/password login in 2026).
+Uses twikit, which logs into a real X account to fetch tweets (the
+free "no login" syndication endpoint for profile timelines has been
+discontinued by X as of late 2026).
 
-Requires this environment variable to be set:
+Requires these environment variables to be set on this machine:
+    TWITTER_USERNAME  - the bot account's @handle (no @)
+    TWITTER_EMAIL      - the bot account's email
+    TWITTER_PASSWORD   - the bot account's password
     TELEGRAM_BOT_TOKEN - your Telegram bot's token from BotFather
 
-Also requires a cookies.json file in the same folder (see setup guide).
+Safety notes (to avoid the bot account getting flagged):
+    - Cookies are cached to cookies.json so it logs in fresh only once,
+      not on every run.
+    - Don't drop the polling interval below ~10 minutes.
 """
 
 import asyncio
@@ -48,7 +55,7 @@ def save_last_tweet_id(tweet_id):
         f.write(str(tweet_id))
 
 
-# ---- Login (uses cookies exported from a real browser session) -----------
+# ---- Login (reuses cached cookies when possible) ---------------------------
 
 
 async def ensure_logged_in():
@@ -78,8 +85,14 @@ async def ensure_logged_in():
 
 async def fetch_latest_tweets(handle):
     user = await client.get_user_by_screen_name(handle)
-    tweets = await client.get_user_tweets(user.id, "Tweets", count=MAX_TWEETS_PER_RUN + 2)
-    return list(tweets)
+    tweets = await client.get_user_tweets(user.id, "Tweets", count=MAX_TWEETS_PER_RUN + 5)
+    tweets = [t for t in tweets if not is_retweet(t)]
+    return tweets
+
+
+def is_retweet(tweet):
+    text = getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or ""
+    return bool(getattr(tweet, "retweeted_tweet", None)) or text.startswith("RT @")
 
 
 def extract_text_and_image(tweet):
