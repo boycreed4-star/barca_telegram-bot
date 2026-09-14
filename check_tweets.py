@@ -122,23 +122,32 @@ def extract_text_and_image(tweet):
 
 
 def send_to_telegram(text, image_url):
+    any_success = False
     for target in TELEGRAM_TARGETS:
-        if image_url:
-            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            payload = {
-                "chat_id": target,
-                "caption": text[:1024],  # Telegram caption limit
-                "photo": image_url,
-            }
-        else:
-            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": target,
-                "text": text[:4096],  # Telegram message limit
-            }
+        try:
+            if image_url:
+                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                payload = {
+                    "chat_id": target,
+                    "caption": text[:1024],  # Telegram caption limit
+                    "photo": image_url,
+                }
+            else:
+                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                payload = {
+                    "chat_id": target,
+                    "text": text[:4096],  # Telegram message limit
+                }
 
-        resp = requests.post(api_url, data=payload, timeout=20)
-        resp.raise_for_status()
+            resp = requests.post(api_url, data=payload, timeout=20)
+            resp.raise_for_status()
+            any_success = True
+        except requests.RequestException as e:
+            # Don't let one broken destination (e.g. bot not yet added to a
+            # group) block sending to the others, or block saving progress.
+            print(f"WARNING: failed to send to {target}: {e}")
+
+    return any_success
 
 
 # ---- Main -------------------------------------------------------------------
@@ -155,7 +164,6 @@ async def main():
         return
 
     tweets.sort(key=lambda t: int(t.id))
-    print("DEBUG - fetched tweet ids:", [t.id for t in tweets])
 
     if last_id is None:
         # First ever run: don't spam the channel with the whole recent
