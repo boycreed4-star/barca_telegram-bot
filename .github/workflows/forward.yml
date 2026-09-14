@@ -2,11 +2,11 @@ name: Forward tweets to Telegram
 
 on:
   schedule:
-            - cron: "*/15 * * * *"   # every 15 minutes# every 2 minutes     - cron: "*/15 * * * *"   # every # every 10 minutes
-  workflow_dispatch: {}           # every 2 minutes    # lets you trigger it manually from the Actions tab
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
 
 permissions:
-  contents: write            # needed so the commit last_tweet_id.txt
+  contents: write            # needed so the workflow can commit last_tweet_id.txt
 
 jobs:
   forward:
@@ -37,6 +37,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_tweet_id.txt
+          git add last_tweet_id_*.txt recent_posts.json
           git diff --staged --quiet || git commit -m "Update last posted tweet id"
           git push
