@@ -2,7 +2,7 @@ name: Forward tweets to Telegram
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+        - cron: "*/5 * * * *"    # every 5 minutes   # every 10 minutes
   workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
 
 permissions:
