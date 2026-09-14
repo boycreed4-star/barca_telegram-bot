@@ -95,48 +95,72 @@ def is_retweet(tweet):
     return bool(getattr(tweet, "retweeted_tweet", None)) or text.startswith("RT @")
 
 
-def extract_text_and_image(tweet):
+def extract_text_and_media(tweet):
     text = html.unescape(getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or "")
 
     # Twitter appends a t.co link at the end of the text when there's media
-    # attached -- strip it since we're sending the image separately.
+    # attached -- strip it since we're sending the media separately.
     text = re.sub(r"\s*https://t\.co/\w+\s*$", "", text).strip()
 
-    image_url = None
+    media_type = None
+    media_url = None
+
     media_list = getattr(tweet, "media", None) or []
     if media_list:
         first = media_list[0]
-        # Different twikit media types expose the URL under slightly
-        # different attribute names -- try the common ones.
-        image_url = (
-            getattr(first, "media_url", None)
-            or getattr(first, "media_url_https", None)
-            or getattr(first, "url", None)
-            or getattr(first, "thumbnail_url", None)
-        )
+        kind = (getattr(first, "type", None) or type(first).__name__).lower()
 
-    return text, image_url
+        if "video" in kind or "gif" in kind:
+            media_type = "video"
+            streams = getattr(first, "streams", None) or []
+            best = None
+            best_bitrate = -1
+            for s in streams:
+                content_type = getattr(s, "content_type", "") or ""
+                bitrate = getattr(s, "bitrate", 0) or 0
+                if "mp4" in content_type and bitrate >= best_bitrate:
+                    best = s
+                    best_bitrate = bitrate
+            if best is not None:
+                media_url = getattr(best, "url", None)
+        else:
+            media_type = "photo"
+            media_url = (
+                getattr(first, "media_url", None)
+                or getattr(first, "media_url_https", None)
+                or getattr(first, "url", None)
+                or getattr(first, "thumbnail_url", None)
+            )
+
+    return text, media_type, media_url
 
 
 # ---- Sending to Telegram ----------------------------------------------------
 
 
-def send_to_telegram(text, image_url):
+def send_to_telegram(text, media_type, media_url):
     any_success = False
     for target in TELEGRAM_TARGETS:
         try:
-            if image_url:
+            if media_type == "video" and media_url:
+                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+                payload = {
+                    "chat_id": target,
+                    "caption": text[:1024],
+                    "video": media_url,
+                }
+            elif media_type == "photo" and media_url:
                 api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
                 payload = {
                     "chat_id": target,
-                    "caption": text[:1024],  # Telegram caption limit
-                    "photo": image_url,
+                    "caption": text[:1024],
+                    "photo": media_url,
                 }
             else:
                 api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 payload = {
                     "chat_id": target,
-                    "text": text[:4096],  # Telegram message limit
+                    "text": text[:4096],
                 }
 
             resp = requests.post(api_url, data=payload, timeout=20)
@@ -180,8 +204,8 @@ async def main():
         return
 
     for tweet in new_tweets:
-        text, image_url = extract_text_and_image(tweet)
-        send_to_telegram(text, image_url)
+        text, media_type, media_url = extract_text_and_media(tweet)
+        send_to_telegram(text, media_type, media_url)
         save_last_tweet_id(tweet.id)
         print(f"Posted tweet {tweet.id}")
 
