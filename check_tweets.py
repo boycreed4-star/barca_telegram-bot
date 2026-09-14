@@ -30,7 +30,7 @@ from twikit import Client
 # ---- Configuration -------------------------------------------------------
 
 TWITTER_HANDLE = "BarcaTimes"          # no @
-TELEGRAM_CHANNEL = "@footbal_2325"     # public channel username
+TELEGRAM_TARGETS = ["@footbal_2325", "@fcbarcelonachatgroup"]  # channel + group
 STATE_FILE = "last_tweet_id.txt"
 COOKIES_FILE = "cookies.json"
 MAX_TWEETS_PER_RUN = 5                 # safety cap so a big backlog can't spam the channel
@@ -122,22 +122,23 @@ def extract_text_and_image(tweet):
 
 
 def send_to_telegram(text, image_url):
-    if image_url:
-        api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        payload = {
-            "chat_id": TELEGRAM_CHANNEL,
-            "caption": text[:1024],  # Telegram caption limit
-            "photo": image_url,
-        }
-    else:
-        api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHANNEL,
-            "text": text[:4096],  # Telegram message limit
-        }
+    for target in TELEGRAM_TARGETS:
+        if image_url:
+            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            payload = {
+                "chat_id": target,
+                "caption": text[:1024],  # Telegram caption limit
+                "photo": image_url,
+            }
+        else:
+            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": target,
+                "text": text[:4096],  # Telegram message limit
+            }
 
-    resp = requests.post(api_url, data=payload, timeout=20)
-    resp.raise_for_status()
+        resp = requests.post(api_url, data=payload, timeout=20)
+        resp.raise_for_status()
 
 
 # ---- Main -------------------------------------------------------------------
@@ -154,6 +155,7 @@ async def main():
         return
 
     tweets.sort(key=lambda t: int(t.id))
+    print("DEBUG - fetched tweet ids:", [t.id for t in tweets])
 
     if last_id is None:
         # First ever run: don't spam the channel with the whole recent
