@@ -20,7 +20,9 @@ Safety notes (to avoid the bot account getting flagged):
 """
 
 import asyncio
+import difflib
 import html
+import json
 import os
 import re
 
@@ -29,11 +31,14 @@ from twikit import Client
 
 # ---- Configuration -------------------------------------------------------
 
-TWITTER_HANDLE = "BarcaTimes"          # no @
+TWITTER_HANDLES = ["BarcaTimes", "BarcaUniversal"]  # no @, add more here later
 TELEGRAM_TARGETS = ["@footbal_2325", "@fcbarcelonachatgroup"]  # channel + group
-STATE_FILE = "last_tweet_id.txt"
 COOKIES_FILE = "cookies.json"
 MAX_TWEETS_PER_RUN = 5                 # safety cap so a big backlog can't spam the channel
+
+RECENT_POSTS_FILE = "recent_posts.json"
+RECENT_POSTS_TO_KEEP = 40       # how many past posts to compare new ones against
+DUPLICATE_SIMILARITY_THRESHOLD = 0.6  # 0-1, higher = stricter match required
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
@@ -42,17 +47,59 @@ client = Client("en-US")
 # ---- State (avoids re-posting the same tweet) -----------------------------
 
 
-def get_last_tweet_id():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
+def state_file_for(handle):
+    return f"last_tweet_id_{handle}.txt"
+
+
+def get_last_tweet_id(handle):
+    path = state_file_for(handle)
+    if os.path.exists(path):
+        with open(path, "r") as f:
             content = f.read().strip()
             return content or None
     return None
 
 
-def save_last_tweet_id(tweet_id):
-    with open(STATE_FILE, "w") as f:
+def save_last_tweet_id(handle, tweet_id):
+    with open(state_file_for(handle), "w") as f:
         f.write(str(tweet_id))
+
+
+# ---- Cross-account duplicate detection -------------------------------------
+
+
+def normalize_text(text):
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", "", text)  # strip punctuation
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def load_recent_posts():
+    if os.path.exists(RECENT_POSTS_FILE):
+        with open(RECENT_POSTS_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return []
+    return []
+
+
+def save_recent_posts(posts):
+    posts = posts[-RECENT_POSTS_TO_KEEP:]
+    with open(RECENT_POSTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(posts, f)
+
+
+def is_duplicate_content(text, recent_posts):
+    if not text:
+        return False
+    normalized = normalize_text(text)
+    for prior in recent_posts:
+        ratio = difflib.SequenceMatcher(None, normalized, prior).ratio()
+        if ratio >= DUPLICATE_SIMILARITY_THRESHOLD:
+            return True
+    return False
 
 
 # ---- Login (reuses cached cookies when possible) ---------------------------
@@ -179,35 +226,52 @@ def send_to_telegram(text, media_type, media_url):
 
 async def main():
     await ensure_logged_in()
+    recent_posts = load_recent_posts()
 
-    last_id = get_last_tweet_id()
-    tweets = await fetch_latest_tweets(TWITTER_HANDLE)
+    for handle in TWITTER_HANDLES:
+        print(f"--- Checking @{handle} ---")
+        recent_posts = await check_account(handle, recent_posts)
+
+    save_recent_posts(recent_posts)
+
+
+async def check_account(handle, recent_posts):
+    last_id = get_last_tweet_id(handle)
+    tweets = await fetch_latest_tweets(handle)
 
     if not tweets:
-        print("No tweets found.")
-        return
+        print(f"No tweets found for @{handle}.")
+        return recent_posts
 
     tweets.sort(key=lambda t: int(t.id))
 
     if last_id is None:
-        # First ever run: don't spam the channel with the whole recent
-        # history, just remember the newest tweet and start from there.
-        save_last_tweet_id(tweets[-1].id)
-        print(f"Initialized. Latest tweet id: {tweets[-1].id}. No messages sent.")
-        return
+        # First ever run for this account: don't spam the channel with the
+        # whole recent history, just remember the newest tweet.
+        save_last_tweet_id(handle, tweets[-1].id)
+        print(f"Initialized @{handle}. Latest tweet id: {tweets[-1].id}. No messages sent.")
+        return recent_posts
 
     new_tweets = [t for t in tweets if int(t.id) > int(last_id)]
     new_tweets = new_tweets[-MAX_TWEETS_PER_RUN:]
 
     if not new_tweets:
-        print("No new tweets.")
-        return
+        print(f"No new tweets for @{handle}.")
+        return recent_posts
 
     for tweet in new_tweets:
         text, media_type, media_url = extract_text_and_media(tweet)
-        send_to_telegram(text, media_type, media_url)
-        save_last_tweet_id(tweet.id)
-        print(f"Posted tweet {tweet.id}")
+
+        if is_duplicate_content(text, recent_posts):
+            print(f"Skipped tweet {tweet.id} from @{handle} (duplicate of a recent post)")
+        else:
+            send_to_telegram(text, media_type, media_url)
+            recent_posts.append(normalize_text(text))
+            print(f"Posted tweet {tweet.id} from @{handle}")
+
+        save_last_tweet_id(handle, tweet.id)
+
+    return recent_posts
 
 
 if __name__ == "__main__":
