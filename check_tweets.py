@@ -32,7 +32,7 @@ from twikit import Client
 # ---- Configuration -------------------------------------------------------
 
 TWITTER_HANDLES = ["BarcaTimes"]  # no @, add more here later
-TELEGRAM_TARGETS = ["@footbal_2325", "@fcbarcelonachatgroup"]  # channel + group
+TELEGRAM_TARGETS = ["@barcatimes1", "@fcbarcelonachatgroup"]  # channel + group
 COOKIES_FILE = "cookies.json"
 MAX_TWEETS_PER_RUN = 5                 # safety cap so a big backlog can't spam the channel
 
