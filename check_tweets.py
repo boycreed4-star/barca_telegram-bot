@@ -3,19 +3,18 @@ Forwards new tweets from an X (Twitter) account to a Telegram channel,
 posting just the text + image (no twitter.com/x.com link, so Telegram
 won't generate a link-preview card).
 
+Also writes each posted tweet to wa_queue.json so the phone bot can
+forward it to a WhatsApp Channel.
+
 Uses twikit, which logs into a real X account to fetch tweets (the
 free "no login" syndication endpoint for profile timelines has been
 discontinued by X as of late 2026).
 
 Requires these environment variables to be set on this machine:
-    TWITTER_USERNAME  - the bot account's @handle (no @)
-    TWITTER_EMAIL      - the bot account's email
-    TWITTER_PASSWORD   - the bot account's password
     TELEGRAM_BOT_TOKEN - your Telegram bot's token from BotFather
 
 Safety notes (to avoid the bot account getting flagged):
-    - Cookies are cached to cookies.json so it logs in fresh only once,
-      not on every run.
+    - Cookies are loaded from cookies.json (exported from a real browser session).
     - Don't drop the polling interval below ~10 minutes.
 """
 
@@ -39,6 +38,9 @@ MAX_TWEETS_PER_RUN = 5                 # safety cap so a big backlog can't spam 
 RECENT_POSTS_FILE = "recent_posts.json"
 RECENT_POSTS_TO_KEEP = 40       # how many past posts to compare new ones against
 DUPLICATE_SIMILARITY_THRESHOLD = 0.6  # 0-1, higher = stricter match required
+
+WA_QUEUE_FILE = "wa_queue.json"   # read by the phone bot (WhatsApp)
+WA_QUEUE_TO_KEEP = 30
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
@@ -100,6 +102,36 @@ def is_duplicate_content(text, recent_posts):
         if ratio >= DUPLICATE_SIMILARITY_THRESHOLD:
             return True
     return False
+
+
+# ---- WhatsApp queue (read by the phone bot) --------------------------------
+
+
+def load_wa_queue():
+    if os.path.exists(WA_QUEUE_FILE):
+        with open(WA_QUEUE_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return []
+    return []
+
+
+def save_wa_queue(queue):
+    queue = queue[-WA_QUEUE_TO_KEEP:]
+    with open(WA_QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump(queue, f)
+
+
+def add_to_wa_queue(tweet_id, text, media_type, media_url):
+    queue = load_wa_queue()
+    queue.append({
+        "id": str(tweet_id),
+        "text": text,
+        "media_type": media_type,
+        "media_url": media_url,
+    })
+    save_wa_queue(queue)
 
 
 # ---- Login (reuses cached cookies when possible) ---------------------------
@@ -233,6 +265,8 @@ async def main():
         recent_posts = await check_account(handle, recent_posts)
 
     save_recent_posts(recent_posts)
+    # Make sure wa_queue.json always exists so the workflow's git add works.
+    save_wa_queue(load_wa_queue())
 
 
 async def check_account(handle, recent_posts):
@@ -266,6 +300,7 @@ async def check_account(handle, recent_posts):
             print(f"Skipped tweet {tweet.id} from @{handle} (duplicate of a recent post)")
         else:
             send_to_telegram(text, media_type, media_url)
+            add_to_wa_queue(tweet.id, text, media_type, media_url)
             recent_posts.append(normalize_text(text))
             print(f"Posted tweet {tweet.id} from @{handle}")
 
