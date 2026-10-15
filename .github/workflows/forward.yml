@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write            # needed so the workflow can commit state files
 
+concurrency:
+  group: forward-tweets      # only one run at a time, so pushes don't collide
+  cancel-in-progress: false
+
 jobs:
   forward:
     runs-on: ubuntu-latest
@@ -39,4 +43,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add last_tweet_id_*.txt recent_posts.json wa_queue.json
           git diff --staged --quiet || git commit -m "Update last posted tweet id"
+          git pull --rebase origin main
           git push
