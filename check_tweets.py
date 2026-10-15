@@ -278,6 +278,7 @@ async def check_account(handle, recent_posts):
         return recent_posts
 
     tweets.sort(key=lambda t: int(t.id))
+    print("last_id:", last_id, "| fetched:", [(t.id, (getattr(t, "full_text", "") or "")[:30]) for t in tweets])
 
     if last_id is None:
         # First ever run for this account: don't spam the channel with the
