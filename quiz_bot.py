@@ -2,9 +2,9 @@
 Posts a daily Barca trivia question to the channel as a native Telegram
 quiz poll (shows the correct answer automatically once people vote).
 
-Runs once a day via GitHub's own schedule (daily schedules are reliable --
-the earlier issues were specific to very frequent schedules like every
-few minutes).
+Runs once a day via GitHub's own schedule. The question is chosen from
+today's date, so it cycles through the whole bank in order and needs no
+saved state between runs.
 
 Requires:
     TELEGRAM_BOT_TOKEN - your bot's token from BotFather
@@ -12,6 +12,7 @@ Requires:
 
 import json
 import os
+from datetime import datetime, timezone
 
 import requests
 
@@ -19,7 +20,6 @@ import requests
 
 TARGET_CHANNEL = "@barcatimes1"
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-STATE_FILE = "quiz_state.json"
 
 QUESTIONS = [
     {
@@ -85,36 +85,13 @@ QUESTIONS = [
 ]
 
 
-# ---- State ------------------------------------------------------------------
+# ---- Question selection -----------------------------------------------------
 
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-    return {}
-
-
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-
-
-def pick_next_question(state):
-    used = state.get("used_indices", [])
-    remaining = [i for i in range(len(QUESTIONS)) if i not in used]
-
-    if not remaining:
-        used = []  # exhausted the bank -- start over
-        remaining = list(range(len(QUESTIONS)))
-
-    next_index = remaining[0]
-    used.append(next_index)
-    state["used_indices"] = used
-    return QUESTIONS[next_index], state
+def pick_question_for_today():
+    """Pick by date: one new question per day, cycling through the bank."""
+    day_number = datetime.now(timezone.utc).toordinal()
+    return QUESTIONS[day_number % len(QUESTIONS)]
 
 
 # ---- Telegram -----------------------------------------------------------------
@@ -141,10 +118,8 @@ def send_quiz(question_data):
 
 
 def main():
-    state = load_state()
-    question_data, state = pick_next_question(state)
+    question_data = pick_question_for_today()
     send_quiz(question_data)
-    save_state(state)
     print(f"Posted quiz: {question_data['question']}")
 
 
