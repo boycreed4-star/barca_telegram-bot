@@ -5,17 +5,6 @@ won't generate a link-preview card).
 
 Also writes each posted tweet to wa_queue.json so the phone bot can
 forward it to a WhatsApp Channel.
-
-Uses twikit, which logs into a real X account to fetch tweets (the
-free "no login" syndication endpoint for profile timelines has been
-discontinued by X as of late 2026).
-
-Requires these environment variables to be set on this machine:
-    TELEGRAM_BOT_TOKEN - your Telegram bot's token from BotFather
-
-Safety notes (to avoid the bot account getting flagged):
-    - Cookies are loaded from cookies.json (exported from a real browser session).
-    - Don't drop the polling interval below ~10 minutes.
 """
 
 import asyncio
@@ -30,24 +19,24 @@ from twikit import Client
 
 # ---- Configuration -------------------------------------------------------
 
-TWITTER_HANDLES = ["BarcaTimes"]  # no @, add more here later
-TELEGRAM_TARGETS = ["@barcatimes1", "@fcbarcelonachatgroup"]  # channel + group
+TWITTER_HANDLES = ["BarcaTimes"]
+TELEGRAM_TARGETS = ["@barcatimes1", "@fcbarcelonachatgroup"]
 COOKIES_FILE = "cookies.json"
-MAX_TWEETS_PER_RUN = 5                 # safety cap so a big backlog can't spam the channel
+MAX_TWEETS_PER_RUN = 5
 
 RECENT_POSTS_FILE = "recent_posts.json"
-RECENT_POSTS_TO_KEEP = 40       # how many past posts to compare new ones against
-DUPLICATE_SIMILARITY_THRESHOLD = 0.6  # 0-1, higher = stricter match required
+RECENT_POSTS_TO_KEEP = 40
+DUPLICATE_SIMILARITY_THRESHOLD = 0.6
 
-WA_QUEUE_FILE = "wa_queue.json"   # read by the phone bot (WhatsApp)
+WA_QUEUE_FILE = "wa_queue.json"
 WA_QUEUE_TO_KEEP = 30
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 client = Client("en-US")
 
-# ---- State (avoids re-posting the same tweet) -----------------------------
 
+# ---- State (avoids re-posting the same tweet) -----------------------------
 
 def state_file_for(handle):
     return f"last_tweet_id_{handle}.txt"
@@ -67,12 +56,11 @@ def save_last_tweet_id(handle, tweet_id):
         f.write(str(tweet_id))
 
 
-# ---- Cross-account duplicate detection -------------------------------------
-
+# ---- Duplicate detection ---------------------------------------------------
 
 def normalize_text(text):
     text = text.lower()
-    text = re.sub(r"[^\w\s]", "", text)  # strip punctuation
+    text = re.sub(r"[^\w\s]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -104,8 +92,7 @@ def is_duplicate_content(text, recent_posts):
     return False
 
 
-# ---- WhatsApp queue (read by the phone bot) --------------------------------
-
+# ---- WhatsApp queue --------------------------------------------------------
 
 def load_wa_queue():
     if os.path.exists(WA_QUEUE_FILE):
@@ -134,32 +121,27 @@ def add_to_wa_queue(tweet_id, text, media_type, media_url):
     save_wa_queue(queue)
 
 
-# ---- Login (reuses cached cookies when possible) ---------------------------
-
+# ---- Login -----------------------------------------------------------------
 
 async def ensure_logged_in():
-    # X retired the old username/password login flow (now requires
-    # JS-obfuscated tokens and supports passkeys, which a plain script
-    # can't drive). Authentication now works only via cookies exported
-    # from a real logged-in browser session -- see cookies.json setup.
     if not os.path.exists(COOKIES_FILE):
-        raise RuntimeError(
-            f"No {COOKIES_FILE} found. Log into the bot's X account in your "
-            "browser, export its cookies, convert them with convert_cookies.py, "
-            f"and place the result at {COOKIES_FILE} in this folder."
-        )
+        raise RuntimeError("No cookies.json found.")
 
     client.load_cookies(COOKIES_FILE)
     try:
-        await client.user_id()  # cheap call to confirm the session is valid
+        await client.user_id()
     except Exception as e:
         raise RuntimeError(
-            f"{COOKIES_FILE} exists but the session is invalid or expired. "
+            "cookies.json exists but the session is invalid or expired. "
             "Log into the account again in your browser and re-export cookies."
         ) from e
 
 
 # ---- Fetching tweets -------------------------------------------------------
+
+def is_retweet(tweet):
+    text = getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or ""
+    return bool(getattr(tweet, "retweeted_tweet", None)) or text.startswith("RT @")
 
 
 async def fetch_latest_tweets(handle):
@@ -169,16 +151,31 @@ async def fetch_latest_tweets(handle):
     return tweets
 
 
-def is_retweet(tweet):
-    text = getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or ""
-    return bool(getattr(tweet, "retweeted_tweet", None)) or text.startswith("RT @")
+def pick_video_url(media):
+    streams = getattr(media, "streams", None) or []
+    best_url = None
+    best_bitrate = -1
+    for s in streams:
+        content_type = getattr(s, "content_type", "") or ""
+        bitrate = getattr(s, "bitrate", 0) or 0
+        if "mp4" in content_type and bitrate >= best_bitrate:
+            best_url = getattr(s, "url", None)
+            best_bitrate = bitrate
+    return best_url
+
+
+def pick_photo_url(media):
+    return (
+        getattr(media, "media_url", None)
+        or getattr(media, "media_url_https", None)
+        or getattr(media, "url", None)
+        or getattr(media, "thumbnail_url", None)
+    )
 
 
 def extract_text_and_media(tweet):
-    text = html.unescape(getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or "")
-
-    # Twitter appends a t.co link at the end of the text when there's media
-    # attached -- strip it since we're sending the media separately.
+    raw = getattr(tweet, "full_text", None) or getattr(tweet, "text", "") or ""
+    text = html.unescape(raw)
     text = re.sub(r"\s*https://t\.co/\w+\s*$", "", text).strip()
 
     media_type = None
@@ -188,61 +185,122 @@ def extract_text_and_media(tweet):
     if media_list:
         first = media_list[0]
         kind = (getattr(first, "type", None) or type(first).__name__).lower()
-
         if "video" in kind or "gif" in kind:
             media_type = "video"
-            streams = getattr(first, "streams", None) or []
-            best = None
-            best_bitrate = -1
-            for s in streams:
-                content_type = getattr(s, "content_type", "") or ""
-                bitrate = getattr(s, "bitrate", 0) or 0
-                if "mp4" in content_type and bitrate >= best_bitrate:
-                    best = s
-                    best_bitrate = bitrate
-            if best is not None:
-                media_url = getattr(best, "url", None)
+            media_url = pick_video_url(first)
         else:
             media_type = "photo"
-            media_url = (
-                getattr(first, "media_url", None)
-                or getattr(first, "media_url_https", None)
-                or getattr(first, "url", None)
-                or getattr(first, "thumbnail_url", None)
-            )
+            media_url = pick_photo_url(first)
 
     return text, media_type, media_url
 
 
-# ---- Sending to Telegram ----------------------------------------------------
+# ---- Sending to Telegram ---------------------------------------------------
+
+def build_telegram_request(target, text, media_type, media_url):
+    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    if media_type == "video" and media_url:
+        return base + "/sendVideo", {
+            "chat_id": target,
+            "caption": text[:1024],
+            "video": media_url,
+        }
+    if media_type == "photo" and media_url:
+        return base + "/sendPhoto", {
+            "chat_id": target,
+            "caption": text[:1024],
+            "photo": media_url,
+        }
+    return base + "/sendMessage", {
+        "chat_id": target,
+        "text": text[:4096],
+    }
+
+
+def send_one(target, text, media_type, media_url):
+    api_url, payload = build_telegram_request(target, text, media_type, media_url)
+    resp = requests.post(api_url, data=payload, timeout=20)
+    resp.raise_for_status()
 
 
 def send_to_telegram(text, media_type, media_url):
     any_success = False
     for target in TELEGRAM_TARGETS:
         try:
-            if media_type == "video" and media_url:
-                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-                payload = {
-                    "chat_id": target,
-                    "caption": text[:1024],
-                    "video": media_url,
-                }
-            elif media_type == "photo" and media_url:
-                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                payload = {
-                    "chat_id": target,
-                    "caption": text[:1024],
-                    "photo": media_url,
-                }
-            else:
-                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                payload = {
-                    "chat_id": target,
-                    "text": text[:4096],
-                }
-
-            resp = requests.post(api_url, data=payload, timeout=20)
-            resp.raise_for_status()
+            send_one(target, text, media_type, media_url)
             any_success = True
         except requests.RequestException as e:
+            print(f"WARNING: failed to send to {target}: {e}")
+    return any_success
+
+
+# ---- Main ------------------------------------------------------------------
+
+async def main():
+    await ensure_logged_in()
+    recent_posts = load_recent_posts()
+
+    try:
+        for handle in TWITTER_HANDLES:
+            print(f"--- Checking @{handle} ---")
+            recent_posts = await check_account(handle, recent_posts)
+    finally:
+        save_recent_posts(recent_posts)
+        save_wa_queue(load_wa_queue())
+
+
+def handle_one_tweet(tweet, handle, recent_posts):
+    text, media_type, media_url = extract_text_and_media(tweet)
+
+    if is_duplicate_content(text, recent_posts):
+        print(f"Skipped tweet {tweet.id} from @{handle} (duplicate of a recent post)")
+        save_last_tweet_id(handle, tweet.id)
+        return
+
+    send_to_telegram(text, media_type, media_url)
+
+    # Save progress IMMEDIATELY after sending, so a later crash
+    # can never cause this tweet to be sent again.
+    save_last_tweet_id(handle, tweet.id)
+
+    add_to_wa_queue(tweet.id, text, media_type, media_url)
+    recent_posts.append(normalize_text(text))
+    save_recent_posts(recent_posts)
+    print(f"Posted tweet {tweet.id} from @{handle}")
+
+
+async def check_account(handle, recent_posts):
+    last_id = get_last_tweet_id(handle)
+    tweets = await fetch_latest_tweets(handle)
+
+    if not tweets:
+        print(f"No tweets found for @{handle}.")
+        return recent_posts
+
+    tweets.sort(key=lambda t: int(t.id))
+    print("last_id:", last_id, "| fetched:", [t.id for t in tweets])
+
+    if last_id is None:
+        save_last_tweet_id(handle, tweets[-1].id)
+        print(f"Initialized @{handle}. No messages sent.")
+        return recent_posts
+
+    new_tweets = [t for t in tweets if int(t.id) > int(last_id)]
+    new_tweets = new_tweets[-MAX_TWEETS_PER_RUN:]
+
+    if not new_tweets:
+        print(f"No new tweets for @{handle}.")
+        return recent_posts
+
+    for tweet in new_tweets:
+        try:
+            handle_one_tweet(tweet, handle, recent_posts)
+        except Exception as e:
+            print(f"ERROR on tweet {tweet.id} from @{handle}: {e}")
+            save_last_tweet_id(handle, tweet.id)
+
+    return recent_posts
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
